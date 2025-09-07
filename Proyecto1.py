@@ -941,6 +941,93 @@ def procesar_archivo(regex_path, strings_path=None, verbose=False, no_graphs=Fal
     return success_count, total_count
 
 
+def procesar_archivo_con_cadenas(regex_path, strings_path, cross_test=False, verbose=False, no_graphs=False, outdir="outputs"):
+    """
+    Procesa archivo de expresiones regulares con archivo de cadenas.
+    
+    Si cross_test=True: Cada expresión se prueba con cada cadena (modo matriz)
+    Si cross_test=False: La i-ésima expresión se prueba con la i-ésima cadena
+    """
+    # Cargar expresiones regulares
+    with open(regex_path, encoding='utf-8') as f:
+        expressions = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    
+    # Cargar cadenas
+    with open(strings_path, encoding='utf-8') as f:
+        words = [line.strip() for line in f if line.strip()]
+    
+    success_count = 0
+    total_count = 0
+    
+    if cross_test:
+        print(f"\n=== MODO PRUEBA CRUZADA ===")
+        print(f"Probando {len(expressions)} expresiones × {len(words)} cadenas = {len(expressions) * len(words)} combinaciones\n")
+        
+        # Crear tabla de resultados
+        results = []
+        headers = ["Expresión"] + [f"'{w}'" for w in words]
+        
+        for i, expr in enumerate(expressions):
+            print(f"\n--- Expresión {i+1}/{len(expressions)}: {expr} ---")
+            row = [expr]
+            
+            for j, word in enumerate(words):
+                total_count += 1
+                print(f"  Probando con '{word}'...")
+                
+                try:
+                    # Procesamiento silencioso para la matriz
+                    expr2 = expand_plus_question(expr)
+                    tokens = insert_concatenation(expr2)
+                    postfix, _ = shunting_yard(tokens)
+                    root = build_syntax_tree(postfix)
+                    nfa = thompson_from_ast(root)
+                    nfa = renumber_nfa(nfa, make_accept_last=True)
+                    
+                    # Solo simulamos en AFN para rapidez
+                    result = simulate_nfa(nfa, word)
+                    row.append("✓" if result else "✗")
+                    
+                    if result:
+                        success_count += 1
+                        print(f"    ✓ ACEPTA")
+                    else:
+                        print(f"    ✗ RECHAZA")
+                        
+                except Exception as e:
+                    row.append("ERROR")
+                    print(f"    ERROR: {e}")
+            
+            results.append(row)
+        
+        # Mostrar tabla resumen
+        print(f"\n=== TABLA RESUMEN ===")
+        print(f"{'Expresión':<30} | " + " | ".join([f"{w:<8}" for w in words]))
+        print("-" * (32 + len(words) * 11))
+        
+        for row in results:
+            expr_short = (row[0][:27] + "...") if len(row[0]) > 30 else row[0]
+            print(f"{expr_short:<30} | " + " | ".join([f"{r:<8}" for r in row[1:]]))
+    
+    else:
+        print(f"\n=== MODO SECUENCIAL ===")
+        print(f"Procesando {max(len(expressions), len(words))} pares expresión-cadena\n")
+        
+        max_pairs = max(len(expressions), len(words))
+        
+        for i in range(max_pairs):
+            expr = expressions[i] if i < len(expressions) else expressions[-1]  # Reusar última expresión
+            word = words[i] if i < len(words) else words[-1]  # Reusar última cadena
+            
+            total_count += 1
+            
+            if procesar_expresion_completa(expr, word, i+1, verbose, no_graphs, outdir):
+                success_count += 1
+    
+    print(f"\n Resumen: {success_count}/{total_count} pruebas exitosas")
+    return success_count, total_count
+
+
 def modo_interactivo():
     """Modo interactivo para entrada de expresiones y palabras"""
     print("=== MODO INTERACTIVO ===")
@@ -978,7 +1065,8 @@ def create_parser():
         epilog="""
 Ejemplos:
   python Proyecto1.py --regex "(b|b)*abb(a|b)*" --word "babbaaaa"
-  python Proyecto1.py --regex-file expresiones.txt
+  python Proyecto1.py --regex-file expresiones.txt --word-file cadena.txt
+  python Proyecto1.py --regex-file expresiones.txt --word-file cadena.txt --cross-test
   python Proyecto1.py --interactive
   python Proyecto1.py -r "a*" -w "aaa" --verbose --no-graphs
         """
@@ -992,6 +1080,8 @@ Ejemplos:
     
     # Entrada opcional
     parser.add_argument("-w", "--word", help="Cadena a verificar")
+    parser.add_argument("--word-file", "--strings-file", help="Archivo con cadenas a verificar (una por línea)")
+    parser.add_argument("--cross-test", action="store_true", help="Probar cada expresión con cada cadena (modo matriz)")
     parser.add_argument("--epsilon", default="ε", help="Símbolo para épsilon (default: ε)")
     
     # Opciones de salida
@@ -1027,15 +1117,33 @@ def main():
         parser.print_help()
         return
     
+    # Validar combinaciones
+    if args.word and args.word_file:
+        print(" Error: No se puede especificar tanto --word como --word-file")
+        parser.print_help()
+        return
+    
+    if args.cross_test and not (args.regex_file and args.word_file):
+        print(" Error: --cross-test requiere tanto --regex-file como --word-file")
+        parser.print_help()
+        return
+    
     # Crear directorio de salida
     if not args.no_graphs:
         os.makedirs(args.outdir, exist_ok=True)
     
     # Procesar expresión individual
     if args.regex:
+        # Determinar palabra a usar
+        word = args.word
+        if args.word_file:
+            with open(args.word_file, encoding='utf-8') as f:
+                words = [line.strip() for line in f if line.strip()]
+                word = words[0] if words else None
+        
         success = procesar_expresion_completa(
             args.regex, 
-            args.word, 
+            word, 
             1, 
             args.verbose, 
             args.no_graphs, 
@@ -1056,13 +1164,29 @@ def main():
             print(f" Error: El archivo '{args.regex_file}' no existe")
             sys.exit(1)
         
-        success_count, total_count = procesar_archivo(
-            args.regex_file, 
-            None,  # strings_path 
-            args.verbose, 
-            args.no_graphs, 
-            args.outdir
-        )
+        if args.word_file:
+            if not os.path.exists(args.word_file):
+                print(f" Error: El archivo '{args.word_file}' no existe")
+                sys.exit(1)
+            
+            # Usar nueva función con archivo de cadenas
+            success_count, total_count = procesar_archivo_con_cadenas(
+                args.regex_file,
+                args.word_file,
+                args.cross_test,
+                args.verbose,
+                args.no_graphs,
+                args.outdir
+            )
+        else:
+            # Usar función original
+            success_count, total_count = procesar_archivo(
+                args.regex_file, 
+                None,  # strings_path 
+                args.verbose, 
+                args.no_graphs, 
+                args.outdir
+            )
         
         if not args.no_graphs and success_count > 0:
             print(f" Archivos guardados en: {os.path.abspath(args.outdir)}")
