@@ -19,7 +19,10 @@ Uso:
 import argparse
 import os
 import sys
+import sys as _sys
+import time
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from typing import Dict, FrozenSet, List, Set, Tuple, Union
 
 try:
@@ -28,6 +31,24 @@ try:
 except ImportError:
     GRAPHVIZ_AVAILABLE = False
     print("⚠️  Graphviz no disponible. Los gráficos no se generarán.")
+
+@contextmanager
+def _timer():
+    start = time.perf_counter()
+    yield lambda: (time.perf_counter() - start)
+
+def ask_yes_no(prompt: str, default_no: bool = True) -> bool:
+    """Pregunta s/n. True si 's', False si 'n' o vacío según default."""
+    if not _sys.stdin.isatty():
+        return not default_no
+    suf = "[s/N]" if default_no else "[S/n]"   # <--- aquí estaba el error
+    try:
+        ans = input(f"{prompt} {suf} ").strip().lower()
+    except EOFError:
+        return not default_no
+    if ans in ("s", "si", "sí", "y", "yes"): return True
+    if ans in ("n", "no"): return False
+    return not default_no
 
 
 # ===================== Estructuras de datos ===============================
@@ -127,33 +148,33 @@ def precedence(op: str):
     if op == '|':             return 1
     return 0
 
-def shunting_yard(tokens):
+def shunting_yard(tokens, collect_steps: bool = False):
     output, stack, pasos = [], [], []
     for token in tokens:
         if token.startswith('\\') or (len(token) == 1 and (token.isalnum() or token in ['_', '[', ']', '{', '}', 'ε'])):
-            output.append(token); pasos.append((f"operand {token}", output.copy(), stack.copy()))
+            output.append(token); pasos.append((f"operand {token}", output.copy(), stack.copy())) if collect_steps else None
         elif token == '(':
-            stack.append(token); pasos.append(("push (", output.copy(), stack.copy()))
+            stack.append(token); pasos.append(("push (", output.copy(), stack.copy())) if collect_steps else None
         elif token == ')':
             while stack and stack[-1] != '(':
                 op = stack.pop(); output.append(op)
-                pasos.append(("pop for )", output.copy(), stack.copy()))
+                pasos.append(("pop for )", output.copy(), stack.copy())) if collect_steps else None
             if stack and stack[-1] == '(':
-                stack.pop(); pasos.append(("pop (", output.copy(), stack.copy()))
+                stack.pop(); pasos.append(("pop (", output.copy(), stack.copy())) if collect_steps else None
             else:
-                pasos.append(("ignore unmatched )", output.copy(), stack.copy()))
+                pasos.append(("ignore unmatched )", output.copy(), stack.copy())) if collect_steps else None
         elif token in ['|', '.', '*', '+', '?']:
             while stack and precedence(stack[-1]) >= precedence(token):
                 if stack[-1] == '(': break
                 op = stack.pop(); output.append(op)
-                pasos.append((f"pop op {op}", output.copy(), stack.copy()))
-            stack.append(token); pasos.append((f"push op {token}", output.copy(), stack.copy()))
+                pasos.append((f"pop op {op}", output.copy(), stack.copy())) if collect_steps else None
+            stack.append(token); pasos.append((f"push op {token}", output.copy(), stack.copy())) if collect_steps else None
         else:
-            pasos.append((f"ignore {token}", output.copy(), stack.copy()))
+            pasos.append((f"ignore {token}", output.copy(), stack.copy())) if collect_steps else None
     while stack:
         op = stack.pop(); output.append(op)
-        pasos.append((f"pop end {op}", output.copy(), stack.copy()))
-    return output, pasos
+        pasos.append((f"pop end {op}", output.copy(), stack.copy())) if collect_steps else None
+    return (output, pasos) if collect_steps else (output, [])
 
 
 # ===================== Paso 3: AST ==========================================
@@ -372,6 +393,91 @@ def subset_construction(nfa):
             dfa.add_transition(current_dfa_state, symbol, next_dfa_state)
     
     return dfa
+
+def subset_construction_debug(nfa):
+    """Construye AFD desde AFN (versión con prints para ver el proceso)."""
+    # Alfabeto
+    alphabet = set()
+    for transitions in nfa.transitions.values():
+        for symbol, _ in transitions:
+            if symbol != 'ε':
+                alphabet.add(symbol)
+
+    dfa = DFA()
+    dfa.alphabet = alphabet
+
+    # Estado inicial
+    start_closure = epsilon_closure_dfa({nfa.start}, nfa)
+    start_state_name = format_state_set(start_closure)
+    dfa.start = start_state_name
+    dfa.add_state(start_state_name)
+    if nfa.accept in start_closure:
+        dfa.accept_states.add(start_state_name)
+
+    print(f"[TRACE] start_closure = {start_closure} => {start_state_name}")
+    print(f"[TRACE] alphabet = {sorted(alphabet)}")
+
+    from collections import deque
+    queue = deque([(start_state_name, start_closure)])
+    processed = {frozenset(start_closure): start_state_name}
+
+    while queue:
+        current_dfa_state, current_nfa_states = queue.popleft()
+        print(f"[TRACE] ▶ Estado DFA actual: {current_dfa_state} ~ NFA {sorted(current_nfa_states)}")
+        for symbol in alphabet:
+            moved_states = move_dfa(current_nfa_states, symbol, nfa)
+            if not moved_states:
+                print(f"[TRACE]   {symbol}: move = ∅ (sin transición)")
+                continue
+
+            next_states = epsilon_closure_dfa(moved_states, nfa)
+            next_states_frozen = frozenset(next_states)
+            if next_states_frozen in processed:
+                next_dfa_state = processed[next_states_frozen]
+                print(f"[TRACE]   {symbol}: move={sorted(moved_states)}; ε-closure={sorted(next_states)} => EXISTE {next_dfa_state}")
+            else:
+                next_dfa_state = format_state_set(next_states)
+                processed[next_states_frozen] = next_dfa_state
+                dfa.add_state(next_dfa_state)
+                if nfa.accept in next_states:
+                    dfa.accept_states.add(next_dfa_state)
+                queue.append((next_dfa_state, next_states))
+                print(f"[TRACE]   {symbol}: move={sorted(moved_states)}; ε-closure={sorted(next_states)} => NUEVO {next_dfa_state}")
+
+            dfa.add_transition(current_dfa_state, symbol, next_dfa_state)
+            print(f"[TRACE]     transición: δ({current_dfa_state}, {symbol}) = {next_dfa_state}")
+
+    return dfa
+
+
+def subset_construction_wrapper(nfa, verbose=False):
+    """Envuelve la construcción de AFD: pregunta si mostrar el proceso y mide el tiempo."""
+    ver_proceso = ask_yes_no("¿Mostrar el proceso del algoritmo de subconjuntos?", default_no=True)
+    with _timer() as t_sub:
+        if ver_proceso:
+            dfa = subset_construction_debug(nfa)   # con prints
+        else:
+            dfa = subset_construction(nfa)         # tu original
+    dur = t_sub()
+    if verbose:
+        print(f" Construcción de AFD tomó {dur:.6f} s")
+    return dfa
+
+def sanity_check_dfa(dfa):
+    """Chequeo rápido para validar que el AFD esté bien formado."""
+    print("\n--- Chequeo rápido del AFD ---")
+    print("Número de estados:", len(dfa.states))
+    print("Estado inicial:", dfa.start)
+    print("Estados de aceptación:", dfa.accept_states)
+
+    missing = [(q, a) for q in dfa.states 
+               for a in dfa.alphabet 
+               if a not in dfa.transitions.get(q, {})]
+    if missing:
+        print(" Transiciones faltantes:", missing)
+    else:
+        print(" Todas las transiciones están definidas.")
+    print("--- Fin del chequeo ---\n")
 
 
 # ===================== Paso 7: Minimización de AFD ==========================
@@ -638,7 +744,7 @@ def renumber_nfa(nfa: NFA, make_accept_last: bool = True) -> NFA:
 # ===================== Render: Árbol, AFN y AFD ============================
 def visualize_tree(root, filename='tree'):
     if not GRAPHVIZ_AVAILABLE:
-        print(f"⚠️  No se puede generar {filename}.png (Graphviz no disponible)")
+        print(f"  No se puede generar {filename}.png (Graphviz no disponible)")
         return
         
     dot = Digraph(format='png')
@@ -658,7 +764,7 @@ def visualize_tree(root, filename='tree'):
 
 def visualize_nfa(nfa: NFA, filename='nfa'):
     if not GRAPHVIZ_AVAILABLE:
-        print(f"⚠️  No se puede generar {filename}.png (Graphviz no disponible)")
+        print(f"  No se puede generar {filename}.png (Graphviz no disponible)")
         return
         
     dot = Digraph(format='png')
@@ -743,7 +849,7 @@ def procesar_expresion_completa(expr, word=None, idx=1, verbose=False, no_graphs
         nfa = renumber_nfa(nfa, make_accept_last=True)
         
         # Paso 3: AFN → AFD por subconjuntos
-        dfa = subset_construction(nfa)
+        dfa = subset_construction_wrapper(nfa, verbose=True)
         
         # Paso 4: AFD → AFD minimizado
         dfa_min = minimize_dfa(dfa)
@@ -785,9 +891,14 @@ def procesar_expresion_completa(expr, word=None, idx=1, verbose=False, no_graphs
             
             # Verificar equivalencia
             if not (nfa_result == dfa_result == dfa_min_result):
-                print("⚠️  ADVERTENCIA: Los autómatas no son equivalentes!")
+                print("  ADVERTENCIA: Los autómatas no son equivalentes!")
             else:
                 print("✓ Todos los autómatas son equivalentes")
+            
+            # Resultado final claro
+            resultado = "PERTENECE" if nfa_result else "NO PERTENECE"
+            simbolo = "✓" if nfa_result else "✗"
+            print(f"\n{simbolo} RESULTADO: La cadena '{word}' {resultado} al lenguaje de la expresión regular '{expr}'")
         
         if not no_graphs:
             print(f"Archivos: tree_simplified_{idx}.png, nfa_{idx}.png, dfa_{idx}.png, dfa_min_{idx}.png")
@@ -795,7 +906,7 @@ def procesar_expresion_completa(expr, word=None, idx=1, verbose=False, no_graphs
         return True
         
     except Exception as e:
-        print(f"❌ Error procesando '{expr}': {e}")
+        print(f" Error procesando '{expr}': {e}")
         if verbose:
             import traceback
             traceback.print_exc()
@@ -826,7 +937,94 @@ def procesar_archivo(regex_path, strings_path=None, verbose=False, no_graphs=Fal
                 success_count += 1
             idx += 1
     
-    print(f"\n📊 Resumen: {success_count}/{total_count} expresiones procesadas exitosamente")
+    print(f"\n Resumen: {success_count}/{total_count} expresiones procesadas exitosamente")
+    return success_count, total_count
+
+
+def procesar_archivo_con_cadenas(regex_path, strings_path, cross_test=False, verbose=False, no_graphs=False, outdir="outputs"):
+    """
+    Procesa archivo de expresiones regulares con archivo de cadenas.
+    
+    Si cross_test=True: Cada expresión se prueba con cada cadena (modo matriz)
+    Si cross_test=False: La i-ésima expresión se prueba con la i-ésima cadena
+    """
+    # Cargar expresiones regulares
+    with open(regex_path, encoding='utf-8') as f:
+        expressions = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    
+    # Cargar cadenas
+    with open(strings_path, encoding='utf-8') as f:
+        words = [line.strip() for line in f if line.strip()]
+    
+    success_count = 0
+    total_count = 0
+    
+    if cross_test:
+        print(f"\n=== MODO PRUEBA CRUZADA ===")
+        print(f"Probando {len(expressions)} expresiones × {len(words)} cadenas = {len(expressions) * len(words)} combinaciones\n")
+        
+        # Crear tabla de resultados
+        results = []
+        headers = ["Expresión"] + [f"'{w}'" for w in words]
+        
+        for i, expr in enumerate(expressions):
+            print(f"\n--- Expresión {i+1}/{len(expressions)}: {expr} ---")
+            row = [expr]
+            
+            for j, word in enumerate(words):
+                total_count += 1
+                print(f"  Probando con '{word}'...")
+                
+                try:
+                    # Procesamiento silencioso para la matriz
+                    expr2 = expand_plus_question(expr)
+                    tokens = insert_concatenation(expr2)
+                    postfix, _ = shunting_yard(tokens)
+                    root = build_syntax_tree(postfix)
+                    nfa = thompson_from_ast(root)
+                    nfa = renumber_nfa(nfa, make_accept_last=True)
+                    
+                    # Solo simulamos en AFN para rapidez
+                    result = simulate_nfa(nfa, word)
+                    row.append("✓" if result else "✗")
+                    
+                    if result:
+                        success_count += 1
+                        print(f"    ✓ ACEPTA")
+                    else:
+                        print(f"    ✗ RECHAZA")
+                        
+                except Exception as e:
+                    row.append("ERROR")
+                    print(f"    ERROR: {e}")
+            
+            results.append(row)
+        
+        # Mostrar tabla resumen
+        print(f"\n=== TABLA RESUMEN ===")
+        print(f"{'Expresión':<30} | " + " | ".join([f"{w:<8}" for w in words]))
+        print("-" * (32 + len(words) * 11))
+        
+        for row in results:
+            expr_short = (row[0][:27] + "...") if len(row[0]) > 30 else row[0]
+            print(f"{expr_short:<30} | " + " | ".join([f"{r:<8}" for r in row[1:]]))
+    
+    else:
+        print(f"\n=== MODO SECUENCIAL ===")
+        print(f"Procesando {max(len(expressions), len(words))} pares expresión-cadena\n")
+        
+        max_pairs = max(len(expressions), len(words))
+        
+        for i in range(max_pairs):
+            expr = expressions[i] if i < len(expressions) else expressions[-1]  # Reusar última expresión
+            word = words[i] if i < len(words) else words[-1]  # Reusar última cadena
+            
+            total_count += 1
+            
+            if procesar_expresion_completa(expr, word, i+1, verbose, no_graphs, outdir):
+                success_count += 1
+    
+    print(f"\n Resumen: {success_count}/{total_count} pruebas exitosas")
     return success_count, total_count
 
 
@@ -867,7 +1065,8 @@ def create_parser():
         epilog="""
 Ejemplos:
   python Proyecto1.py --regex "(b|b)*abb(a|b)*" --word "babbaaaa"
-  python Proyecto1.py --regex-file expresiones.txt
+  python Proyecto1.py --regex-file expresiones.txt --word-file cadena.txt
+  python Proyecto1.py --regex-file expresiones.txt --word-file cadena.txt --cross-test
   python Proyecto1.py --interactive
   python Proyecto1.py -r "a*" -w "aaa" --verbose --no-graphs
         """
@@ -881,6 +1080,8 @@ Ejemplos:
     
     # Entrada opcional
     parser.add_argument("-w", "--word", help="Cadena a verificar")
+    parser.add_argument("--word-file", "--strings-file", help="Archivo con cadenas a verificar (una por línea)")
+    parser.add_argument("--cross-test", action="store_true", help="Probar cada expresión con cada cadena (modo matriz)")
     parser.add_argument("--epsilon", default="ε", help="Símbolo para épsilon (default: ε)")
     
     # Opciones de salida
@@ -912,7 +1113,18 @@ def main():
     
     # Validar entrada
     if not args.regex and not args.regex_file:
-        print("❌ Error: Debe especificar --regex, --regex-file o --interactive")
+        print(" Error: Debe especificar --regex, --regex-file o --interactive")
+        parser.print_help()
+        return
+    
+    # Validar combinaciones
+    if args.word and args.word_file:
+        print(" Error: No se puede especificar tanto --word como --word-file")
+        parser.print_help()
+        return
+    
+    if args.cross_test and not (args.regex_file and args.word_file):
+        print(" Error: --cross-test requiere tanto --regex-file como --word-file")
         parser.print_help()
         return
     
@@ -922,9 +1134,16 @@ def main():
     
     # Procesar expresión individual
     if args.regex:
+        # Determinar palabra a usar
+        word = args.word
+        if args.word_file:
+            with open(args.word_file, encoding='utf-8') as f:
+                words = [line.strip() for line in f if line.strip()]
+                word = words[0] if words else None
+        
         success = procesar_expresion_completa(
             args.regex, 
-            args.word, 
+            word, 
             1, 
             args.verbose, 
             args.no_graphs, 
@@ -932,29 +1151,45 @@ def main():
         )
         
         if success:
-            print(f"\n✅ Expresión procesada exitosamente")
+            print(f"\n Expresión procesada exitosamente")
             if not args.no_graphs:
-                print(f"📁 Archivos guardados en: {os.path.abspath(args.outdir)}")
+                print(f" Archivos guardados en: {os.path.abspath(args.outdir)}")
         else:
-            print(f"\n❌ Error procesando la expresión")
+            print(f"\n Error procesando la expresión")
             sys.exit(1)
     
     # Procesar archivo de expresiones
     elif args.regex_file:
         if not os.path.exists(args.regex_file):
-            print(f"❌ Error: El archivo '{args.regex_file}' no existe")
+            print(f" Error: El archivo '{args.regex_file}' no existe")
             sys.exit(1)
         
-        success_count, total_count = procesar_archivo(
-            args.regex_file, 
-            None,  # strings_path 
-            args.verbose, 
-            args.no_graphs, 
-            args.outdir
-        )
+        if args.word_file:
+            if not os.path.exists(args.word_file):
+                print(f" Error: El archivo '{args.word_file}' no existe")
+                sys.exit(1)
+            
+            # Usar nueva función con archivo de cadenas
+            success_count, total_count = procesar_archivo_con_cadenas(
+                args.regex_file,
+                args.word_file,
+                args.cross_test,
+                args.verbose,
+                args.no_graphs,
+                args.outdir
+            )
+        else:
+            # Usar función original
+            success_count, total_count = procesar_archivo(
+                args.regex_file, 
+                None,  # strings_path 
+                args.verbose, 
+                args.no_graphs, 
+                args.outdir
+            )
         
         if not args.no_graphs and success_count > 0:
-            print(f"📁 Archivos guardados en: {os.path.abspath(args.outdir)}")
+            print(f" Archivos guardados en: {os.path.abspath(args.outdir)}")
 
 
 if __name__ == '__main__':
@@ -965,7 +1200,7 @@ if __name__ == '__main__':
         strings_path = sys.argv[2] if len(sys.argv) == 3 else None
         
         if not os.path.exists(regex_path):
-            print(f"❌ Error: El archivo '{regex_path}' no existe")
+            print(f" Error: El archivo '{regex_path}' no existe")
             sys.exit(1)
         
         procesar_archivo(regex_path, strings_path, verbose=True, no_graphs=False)
