@@ -19,11 +19,11 @@ Uso:
 import argparse
 import os
 import sys
-from collections import defaultdict, deque
-from typing import Dict, FrozenSet, List, Set, Tuple, Union
-import time
-from contextlib import contextmanager
 import sys as _sys
+import time
+from collections import defaultdict, deque
+from contextlib import contextmanager
+from typing import Dict, FrozenSet, List, Set, Tuple, Union
 
 try:
     from graphviz import Digraph
@@ -894,6 +894,11 @@ def procesar_expresion_completa(expr, word=None, idx=1, verbose=False, no_graphs
                 print("  ADVERTENCIA: Los autómatas no son equivalentes!")
             else:
                 print("✓ Todos los autómatas son equivalentes")
+            
+            # Resultado final claro
+            resultado = "PERTENECE" if nfa_result else "NO PERTENECE"
+            simbolo = "✓" if nfa_result else "✗"
+            print(f"\n{simbolo} RESULTADO: La cadena '{word}' {resultado} al lenguaje de la expresión regular '{expr}'")
         
         if not no_graphs:
             print(f"Archivos: tree_simplified_{idx}.png, nfa_{idx}.png, dfa_{idx}.png, dfa_min_{idx}.png")
